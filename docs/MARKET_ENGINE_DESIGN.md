@@ -1,6 +1,8 @@
 # MarketEngine — Architecture & Design Document
 
-Design for a high-performance Node.js/TypeScript **MarketEngine** module that maintains real-time state for a single Kalshi market. Optimized for ultra-low latency, minimal CPU spikes, and no memory leaks.
+Design for a high-performance TypeScript **MarketEngine** module that maintains real-time state for a single Kalshi market. In this repo the engine runs **inside the Node backend** (`server/src/index.ts`); the browser receives updates via **SSE** (`/api/market/:ticker/stream`), not by instantiating MarketEngine in the client.
+
+**How data enters the engine:** Kalshi **WebSocket** (`orderbook_delta`, `trade`) plus **REST** snapshots for initial load and sequence-gap recovery. See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
@@ -19,11 +21,11 @@ Design for a high-performance Node.js/TypeScript **MarketEngine** module that ma
 │                                      │                                            │
 │                          ┌───────────▼───────────┐                               │
 │                          │  EventEmitter /       │                               │
-│                          │  Stream to Frontend   │                               │
+│                          │  SSE to browser       │                               │
 │                          └───────────────────────┘                               │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                       ▲
-                                      │ WebSocket messages
+                                      │ WebSocket (Node ↔ Kalshi only)
                           ┌───────────┴───────────┐
                           │  Kalshi WS:           │
                           │  - orderbook_snapshot │
@@ -65,7 +67,7 @@ type PriceLevel = [price: number, size: number]
 
 1. On `orderbook_snapshot`: clear both sides, apply all levels from `msg.yes` and `msg.no`.
 2. Store `seq`; subsequent deltas must have `seq = lastSeq + 1`.
-3. If `seq` gap: request new snapshot via REST `GET /markets/{ticker}/orderbook` and replace state.
+3. If `seq` gap: request new snapshot via REST `GET https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/orderbook` (same as server `KALSHI_ORDERBOOK_URL`) and replace state.
 
 ### 2.3 Delta Handling
 
@@ -85,69 +87,48 @@ type PriceLevel = [price: number, size: number]
 
 ### 3.1 Constraint
 
-Kalshi’s orderbook is **aggregated** — only total size per price level, not individual orders. We cannot derive exact queue position from orderbook alone.
+Kalshi’s **public** orderbook is **aggregated** — only total size per price level. Exact queue position for your resting orders comes from the **authenticated** batch API, not from the public book alone.
 
-### 3.2 Approach
+### 3.2 Approach (as used in Kalshi UI)
 
-**Option A — Kalshi API (recommended):**
-- Kalshi exposes `GET /portfolio/orders/{order_id}/queue_position`.
-- When user places a limit order, store `orderId` + `price` + `side`.
-- Poll queue position every 1–2 seconds, or subscribe to order updates if available.
-- Cache last known position; emit when it changes.
+**Primary — Kalshi REST batch endpoint:**
+- `GET /portfolio/orders/queue_positions` with `event_ticker` and/or `market_tickers`, returns rows keyed by `order_id` with `queue_position` / `queue_position_fp`.
+- The **OrderbookPanel** and server fan-out also use **WebSocket** pushes and a **5s REST poll** so queue place updates when *other* traders move the line (private `user_orders` WS alone is insufficient).
 
-**Option B — Estimation (fallback):**
-- When user places order: record `(orderId, price, side, userSize)`.
-- On each `orderbook_delta` at that price: if size decreases, contracts left the queue (trades or cancels).
-- Estimate: `queuePosition ≈ currentSizeAtPrice` (assuming FIFO, we are behind all resting size).
-- On each `trade` at that price: reduce estimated contracts ahead.
-- This is approximate; prefer Option A when possible.
+**Fallback — `QueuePositionTracker` estimation** (`src/market-engine/QueuePositionTracker.ts`):
+- Optional `fetchPosition(orderId)` from REST, or infer from size-at-price on the L2 book when API mode is not wired.
+- Used when extending the engine; the trading UI’s source of truth for displayed queue is the REST batch + server WS + poll path described in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-### 3.3 Implementation
+### 3.3 Implementation (engine module)
 
 - **QueuePositionTracker** holds `Map<orderId, { price, side, size, lastKnownPosition }>`.
-- On order placement: `registerOrder(orderId, price, side, size)`.
-- On order fill/cancel: `unregisterOrder(orderId)`.
-- On orderbook delta at tracked price: update estimated position; if using API, refresh on next poll.
-- Emit `queuePositionUpdate` events to frontend.
+- `registerOrder` / `unregisterOrder` when tracking inside the engine.
+- `onOrderbookDeltaAt` can update coarse estimates; `setFetchPosition` enables API-backed refresh.
+- Emits `queuePosition` events on the engine EventEmitter (browser receives market events via SSE; queue display is separate).
 
 ---
 
 ## 4. Feature 3: Rolling Time-Series Metrics
 
-### 4.1 Windows
+### 4.1 Windows (`src/market-engine/constants.ts`)
 
-- **10-second window**
-- **1-minute window**
+- **Short:** **2s** (`WINDOW_SHORT`) — exposed as `window2s`
+- **Long:** **10s** (`WINDOW_LONG`) — exposed as `window10s`
+- **Buckets:** **60** one-second slots (`METRICS_BUCKET_COUNT`) backing both windows
 
 ### 4.2 Metrics
 
 | Metric | Definition |
 |-------|------------|
-| Total Volume | Sum of `count` over all trades in window |
-| Total Dollar Amount | Sum of `count * yes_price_dollars` (or no_price) over trades |
-| Avg Trade Frequency | `tradeCount / windowSeconds` (trades per second) |
+| Volume | Sum of `count` over trades in window |
+| Notional | Sum of trade notional in window |
+| Trades per second | `tradeCount / windowSeconds` |
 
-### 4.3 Data Structure
+Per-window YES/NO taker breakdown is included (`RollingMetrics.ts`).
 
-**Ring buffer of trades** with timestamps:
-- Preallocate `TradeEntry[]` with max capacity (e.g. 10,000).
-- Each entry: `{ ts: number, count: number, notional: number }`.
-- Head pointer; evict entries older than 1 minute.
-- For 10s and 60s: scan from head backwards until `now - windowMs`; O(n) but n is small.
+### 4.3 Data structure (implemented)
 
-**Alternative — Bucketed counters:**
-- 1-second buckets for last 60 seconds.
-- On each trade: add to current second’s bucket.
-- Rolling sum: sum last 10 buckets, sum last 60 buckets.
-- O(1) update, O(1) query.
-
-### 4.4 Recommendation
-
-Use **1-second buckets** for 60 slots. On trade:
-1. `bucketIdx = (nowSeconds % 60)`.
-2. If `nowSeconds` advanced, zero out overwritten bucket.
-3. Add `count` and `notional` to `buckets[bucketIdx]`.
-4. Expose `getMetrics10s()` and `getMetrics60s()` by summing last 10 and 60 buckets.
+**1-second bucket ring (60 slots):** on each trade, add to the current second’s bucket; `getMetrics(n)` sums the last `n` seconds. `getRollingMetrics()` returns `{ window2s, window10s }`.
 
 ---
 
@@ -155,13 +136,13 @@ Use **1-second buckets** for 60 slots. On trade:
 
 ### 5.1 Structure
 
-- **Fixed-size ring buffer** of 15 trades.
+- **Fixed-size ring buffer**; capacity **`TRADES_FEED_SIZE`** (30 in `constants.ts`).
 - Each: `{ tradeId, yesPrice, noPrice, count, takerSide, ts }`.
 - On new trade: overwrite oldest; emit to frontend.
 
 ### 5.2 Implementation
 
-- Array of 15 slots; `writeIndex = (writeIndex + 1) % 15`.
+- Ring buffer; `writeIndex = (writeIndex + 1) % TRADES_FEED_SIZE`.
 - No allocations in hot path; reuse objects if possible.
 
 ---
@@ -211,23 +192,25 @@ src/
     types.ts              # Shared types (PriceLevel, Trade, etc.)
     OrderbookManager.ts   # L2 book, snapshot/delta handling
     QueuePositionTracker.ts # Order queue position (API + estimation)
-    RollingMetrics.ts     # 10s/60s buckets, volume/notional/frequency
-    TradesFeed.ts         # Ring buffer of last 15 trades
+    RollingMetrics.ts     # 2s/10s windows via 60×1s buckets
+    TradesFeed.ts         # Ring buffer of recent trades (size TRADES_FEED_SIZE)
     constants.ts          # Window sizes, buffer capacities
 ```
 
 ---
 
-## 8. Event Contract (MarketEngine → Frontend)
+## 8. Event Contract (MarketEngine → SSE clients)
+
+Serialized as JSON on the SSE wire (`{ event, data }`). The browser **EventSource** client is in `src/api/market.ts` / `useMarketStream`.
 
 | Event | Payload | When |
 |-------|---------|------|
 | `orderbook` | `{ yes: PriceLevel[], no: PriceLevel[] }` | Snapshot or after coalesced deltas |
 | `bbo` | `{ bestBid, bestAsk }` | Top of book change |
 | `trade` | `Trade` | New trade |
-| `tradesFeed` | `Trade[]` (last 15) | After new trade appended |
+| `tradesFeed` | `Trade[]` (last `TRADES_FEED_SIZE`, default 30) | After new trade appended |
 | `rollingMetrics` | `{ window2s: {...}, window10s: {...} }` | After trade or periodic tick |
-| `queuePosition` | `{ orderId, position }` | Position update for tracked order |
+| `queuePosition` | `orderId`, position (via engine tracker) | If queue tracker wired |
 | `stale` | `boolean` | Connection stale |
 | `seqGap` | `{ expected, received }` | Seq gap detected |
 
@@ -254,8 +237,8 @@ src/
 
 ---
 
-## 11. Open Questions
+## 11. Related implementation notes
 
-1. **Queue position API** — Confirm `GET /portfolio/orders/{order_id}/queue_position` exists and response shape.
-2. **Order lifecycle** — Do we get WebSocket events for order fill/cancel, or only via REST?
-3. **Notional** — For dollar amount, use `count * yes_price_dollars` (or no) depending on taker side.
+1. **Queue position** — This app uses the **batch** endpoint `GET /portfolio/orders/queue_positions` (see `src/api/orders.ts` and server proxy), not a per-order URL.
+2. **Order lifecycle** — Kalshi **private WebSocket** (`user_orders`, `fill`) on the server triggers **REST** refetches of resting orders and queue maps; the browser does not subscribe to Kalshi private WS directly. See [ARCHITECTURE.md](./ARCHITECTURE.md).
+3. **Notional** — Implemented in `RollingMetrics` / trade normalization in the engine per Kalshi trade fields.

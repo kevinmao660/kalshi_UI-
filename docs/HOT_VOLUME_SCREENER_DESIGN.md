@@ -2,7 +2,9 @@
 
 Design document for the **Hot Volume Screener** (Home Dashboard) of a Kalshi prediction-market trading terminal. Assumes no auth/onboarding; user lands directly on this view.
 
-**Data transport:** This page uses **REST API requests only** (poll every 10s). No WebSockets here; WebSockets will be used on the actual trading platform later.
+**Data transport:** This page uses **Kalshi public REST only** — `fetch` to `/api/kalshi/...` (dev proxy) or `VITE_KALSHI_API_BASE` in production builds. **No SSE and no WebSockets** on the screener. Refresh: **`App.tsx`** runs `refresh()` on mount and every **10 seconds** (`setInterval(..., 10_000)`).
+
+**System-wide transport map:** [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
@@ -12,8 +14,8 @@ Design document for the **Hot Volume Screener** (Home Dashboard) of a Kalshi pre
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │  TOP NAVBAR                                                                                                  │
 │  ┌──────────┐  ┌─────────────────────────────────────────────────────┐  ┌─────────────────────────────────┐ │
-│  │ [LOGO]   │  │  🔍 Search markets...                                │  │  Balance: $12,450.00  [Live ●]   │ │
-│  │ Kalshi   │  │                                                      │  │  (monospace, subtle green)       │ │
+│  │ [LOGO]   │  │  🔍 Search markets...                                │  │  (optional: balance — not impl.) │ │
+│  │ Kalshi   │  │                                                      │  │                                  │ │
 │  └──────────┘  └─────────────────────────────────────────────────────┘  └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -40,8 +42,8 @@ Design document for the **Hot Volume Screener** (Home Dashboard) of a Kalshi pre
 ```
 
 **Wireframe notes:**
-- **Navbar:** Full width; logo left, centered search, live balance right (monospace).
-- **Sidebar:** Fixed width (~180px). Preset filters: **All Sports** (default), **Esports**. Below that, an **Event tag** text input + [Apply] so the user can filter by a custom Kalshi event tag (e.g. `nfl`, `lol-worlds`).
+- **Navbar:** Full width; logo left, centered search. (A live balance widget is not present in the current implementation.)
+- **Sidebar:** Fixed width (~180px). Preset categories map to Kalshi **series** tickers (e.g. NBA, college basketball, CS2, League of Legends, Valorant) via `VITE_KALSHI_SERIES_*` env and `CATEGORY_SERIES` in `src/store/screener.ts`. Below that, an **Event tag** text input + [Apply] filters by **`event_ticker`** when applied.
 - **Main:** Table fills remaining space. Thin toolbar above table: sort indicator, “Refreshes every 10s”, last update time. **Pagination** below table: page info, Prev/Next, page numbers, and a “Show: N per page” selector (e.g. 25, 50, 100).
 - **Table:** Columns as specified; 5m Volume is primary sort (desc). Only the **current page** of rows is rendered (paginated slice of the sorted list).
 - **Row flash:** Only the 5m Volume cell gets a short green pulse when that market’s 5m volume jumps significantly between API responses (API-only; no real-time trade events).
@@ -55,12 +57,11 @@ App
 └── ScreenerLayout                    # Layout shell: navbar + sidebar + main
     ├── TopNavbar
     │   ├── AppLogo
-    │   ├── SearchBar                 # Optional: filter by market name/ticker
-    │   └── LiveBalance               # Fetches/WS balance; monospace display
+    │   └── SearchBar                 # Filter by market name/ticker (client-side)
     │
     ├── LeftSidebar
     │   └── CategoryFilters
-    │       ├── CategoryFilterItem    # Preset: "All Sports", "Esports"
+    │       ├── CategoryFilterItem    # Presets: e.g. NBA, college basketball, CS2, LoL, Valorant
     │       ├── EventTagInput         # Free-text input for custom event tag
     │       └── EventTagApplyButton   # Applies tag filter (e.g. [Apply])
     │
@@ -83,8 +84,8 @@ App
 ```
 
 **Data flow (conceptual):**
-- **Stores (e.g. Zustand):** `useScreenerStore()` — markets array (sorted), selected preset (**all_sports** | **esports**), custom **eventTag** (string), **page**, **pageSize**, last refresh time. Separate slice or store for balance.
-- **Filtering:** Preset sets the effective “category” for API/list requests; when **eventTag** is non-empty and applied, it overrides or narrows the filter (e.g. request markets with that event tag). Only one active filter at a time, or combine per API (e.g. “esports” + tag “lol-worlds”).
+- **Store:** `useScreenerStore` (`src/store/screener.ts`) — markets, **category** (`Category` → series ticker), **eventTag** / **eventTagApplied**, **page**, **pageSize**, **sortKey** / **sortDir**, flash sets, etc.
+- **Filtering:** With no applied event tag, **`series_ticker`** is taken from the selected category. When **eventTagApplied** is set, requests use **`event_ticker`** instead of series. Markets are filtered by volume and time-to-event rules in `refresh()` (with optional relaxed fallbacks when the strict filter returns nothing).
 - **Refresh:** Every **10 seconds** re-fetch or re-sort as needed and update the store; pagination slice is derived from sorted list + page + pageSize.
 - **Row flash:** After each API response, compare 5m volume per market to the previous snapshot; if the delta exceeds a threshold, add that market to `flashMarketIds` (or Set) with TTL (e.g. 800ms). Only `Volume5mCell` for that row subscribes and shows the flash CSS animation. (API-only.)
 
@@ -239,4 +240,4 @@ totalPages = Math.ceil(sortedMarkets.length / pageSize)
 - **Sidebar**: preset options **All Sports** and **Esports**; plus **Event tag** input and [Apply] to filter by a custom event tag.
 - **Flash state** kept separate and short-lived for the 5m Volume cell pulse (triggered by 5m volume deltas between API responses, not WebSockets).
 
-This keeps the Hot Volume Screener data-dense, scannable, and responsive with a 10s API refresh and paginated table. **WebSockets are reserved for the trading platform**, not this screener.
+This keeps the Hot Volume Screener data-dense, scannable, and responsive with a 10s API refresh and paginated table. **WebSockets and SSE are used on the trading page only** (see [ARCHITECTURE.md](./ARCHITECTURE.md)); this screener is **REST-only**.
