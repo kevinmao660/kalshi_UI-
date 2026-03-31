@@ -14,7 +14,7 @@ Screener → [Trade] → /market/:ticker → TradingPage
                          ├── Market metadata (REST, public Kalshi API via /api/kalshi)
                          ├── Per market: REST snapshot + SSE stream (backend MarketEngine)
                          ├── Portfolio: REST GET /api/portfolio/positions (polled ~2.5s)
-                         └── OrderbookPanel: REST orders + WS queue/resting + REST queue poll 5s
+                         └── OrderbookPanel: REST orders + WS queue/resting + REST queue on each book update
 ```
 
 - **Browser → Kalshi:** No direct WebSocket. The **Node server** connects to Kalshi’s public WS (`orderbook_delta`, `trade`) and private WS (`user_orders`, `fill`).
@@ -74,7 +74,7 @@ Order entry UI lives **inside** `OrderbookPanel` (not a separate route-level for
 | List resting (initial / merged) | **REST** `GET /api/orders` (scoped by ticker or event) |
 | Live resting updates | **WebSocket** `/api/ws/resting_orders` — server pushes after Kalshi private `user_order` / `fill` + REST refetch |
 | Queue position map | **WebSocket** `/api/ws/queue_positions` — initial REST batch + pushes on scheduled refresh |
-| Queue accuracy vs other traders | **REST** `GET /api/orders/queue_positions` every **5s** (`QUEUE_POLL_INTERVAL_MS`) |
+| Queue accuracy vs other traders | **REST** `GET /api/orders/queue_positions` on each **SSE orderbook** update (when `yes`/`no` levels change) |
 
 ---
 

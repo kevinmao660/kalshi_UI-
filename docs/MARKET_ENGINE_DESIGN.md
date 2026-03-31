@@ -93,7 +93,7 @@ Kalshi’s **public** orderbook is **aggregated** — only total size per price 
 
 **Primary — Kalshi REST batch endpoint:**
 - `GET /portfolio/orders/queue_positions` with `event_ticker` and/or `market_tickers`, returns rows keyed by `order_id` with `queue_position` / `queue_position_fp`.
-- The **OrderbookPanel** and server fan-out also use **WebSocket** pushes and a **5s REST poll** so queue place updates when *other* traders move the line (private `user_orders` WS alone is insufficient).
+- The **OrderbookPanel** and server fan-out also use **WebSocket** pushes and **REST** `queue_positions` whenever the **SSE orderbook** updates so queue place tracks when *other* traders move the line (private `user_orders` WS alone is insufficient).
 
 **Fallback — `QueuePositionTracker` estimation** (`src/market-engine/QueuePositionTracker.ts`):
 - Optional `fetchPosition(orderId)` from REST, or infer from size-at-price on the L2 book when API mode is not wired.

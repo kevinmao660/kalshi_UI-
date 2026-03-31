@@ -24,13 +24,13 @@ This document describes how the app is structured and **which network transports
 | Trading: portfolio positions (contracts, exposure) | **REST** `GET /api/portfolio/positions` (polled ~2.5s on Trading Page) | **REST** `GET /portfolio/positions` |
 | Trading: place / cancel orders | **REST** `POST /api/orders`, `DELETE /api/orders/:id` | **REST** |
 | Trading: resting orders list | **WebSocket** `/api/ws/resting_orders` (push) + Kalshi **REST** list behind the scenes | **REST** `GET /portfolio/orders`; **WebSocket** `user_orders` + `fill` triggers refresh |
-| Trading: queue position per order | **WebSocket** `/api/ws/queue_positions` + **REST** `GET /api/orders/queue_positions` (poll every 5s in UI) | **REST** `GET /portfolio/orders/queue_positions`; **WebSocket** `user_order` triggers refresh |
+| Trading: queue position per order | **WebSocket** `/api/ws/queue_positions` + **REST** `GET /api/orders/queue_positions` on each **SSE orderbook** update (OrderbookPanel) | **REST** `GET /portfolio/orders/queue_positions`; **WebSocket** `user_order` triggers refresh |
 
 **Important distinctions:**
 
 - **Browser does not open a WebSocket to Kalshi.** The Node server holds Kalshi WS connections and feeds **MarketEngine**; the browser uses **SSE** (`EventSource`) for market data.
 - **Portfolio positions** are **REST-only** in the browser (polling). They are not streamed over SSE/WS in this project.
-- **Queue position** needs **REST** because other participants’ trades change your place in line; Kalshi’s private WS does not fully substitute for periodic **`queue_positions`** GETs. The UI uses **both** app WebSocket (server-pushed snapshots after events) and **5s REST** polling.
+- **Queue position** needs **REST** because other participants’ trades change your place in line; Kalshi’s private WS does not fully substitute for **`queue_positions`** GETs. The UI uses **both** app WebSocket (server-pushed snapshots after events) and **REST** refetch whenever the **SSE orderbook** updates.
 
 ---
 
@@ -71,7 +71,7 @@ This document describes how the app is structured and **which network transports
 
 - **Place/cancel:** **REST** (`createOrder`, `cancelOrder` → `/api/orders`).
 - **Resting orders:** **WebSocket** `subscribeRestingOrders` → `/api/ws/resting_orders?ticker=…&event_ticker=…`. Server sends an initial **REST** snapshot and pushes updates when Kalshi **private** WS reports `user_order` or `fill` (coalesced refresh).
-- **Queue positions:** **WebSocket** `subscribeQueuePositions` → `/api/ws/queue_positions?...` plus **REST** `fetchQueuePositionsForMarket` on a **5s** timer (`QUEUE_POLL_INTERVAL_MS` in `src/api/orders.ts`). Private Kalshi WS `user_order` also schedules a server-side queue refresh for that market.
+- **Queue positions:** **WebSocket** `subscribeQueuePositions` → `/api/ws/queue_positions?...` plus **REST** `fetchQueuePositionsForMarket` whenever **`yes`/`no`** orderbook props change (SSE). Private Kalshi WS `user_order` also schedules a server-side queue refresh for that market.
 
 ---
 

@@ -8,7 +8,6 @@ import {
 import {
   type BookOrderRow,
   type PortfolioOrder,
-  QUEUE_POLL_INTERVAL_MS,
   cancelOrder,
   createOrder,
   fetchQueuePositionsForMarket,
@@ -25,6 +24,9 @@ const PRICE_ROWS = Array.from({ length: 99 }, (_, i) => 99 - i)
 
 /** Drop optimistic ladder rows if they never show as resting within this window (instant fill / cancel). */
 const OPTIMISTIC_RESTING_GRACE_MS = 10_000
+
+/** REST poll for GET /portfolio/orders (resting) — queue/cancel chips only show orders seen here + WS snapshots. */
+const RESTING_ORDERS_POLL_MS = 3000
 
 function priceToCents(raw: number | string): number | null {
   if (typeof raw === 'string') {
@@ -94,9 +96,10 @@ export function OrderbookPanel({
   const [quickSize, setQuickSize] = useState('1')
   const [pending, setPending] = useState<string | null>(null)
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
-  const [placedOrders, setPlacedOrders] = useState<BookOrderRow[]>([])
-  const placedOrdersRef = useRef(placedOrders)
-  placedOrdersRef.current = placedOrders
+  /** From GET resting + WS only — queue # and cancel only render for these rows (never optimistic-only). */
+  const [confirmedRestingRows, setConfirmedRestingRows] = useState<BookOrderRow[]>([])
+  const confirmedRestingRowsRef = useRef(confirmedRestingRows)
+  confirmedRestingRowsRef.current = confirmedRestingRows
   /** Rows we added locally before GET/WS shows them; server snapshot is authoritative for everything else. */
   const optimisticRowsRef = useRef<BookOrderRow[]>([])
   /** When we placed each optimistic order (ms) — drop optimistic rows not confirmed as resting after grace (e.g. instant fill). */
@@ -144,7 +147,7 @@ export function OrderbookPanel({
       delete optimisticPlacedAtRef.current[r.orderId]
       return false
     })
-    setPlacedOrders([...fromApi, ...optimisticRowsRef.current])
+    setConfirmedRestingRows(fromApi)
   }, [])
 
   const fetchRestingRowsAndMerge = useCallback(async () => {
@@ -200,25 +203,11 @@ export function OrderbookPanel({
           }
           optimisticPlacedAtRef.current[oid] = Date.now()
           optimisticRowsRef.current = [...optimisticRowsRef.current, row]
-          setPlacedOrders((prev) => {
-            const optimisticIds = new Set(optimisticRowsRef.current.map((o) => o.orderId))
-            const fromApi = prev.filter((r) => !optimisticIds.has(r.orderId))
-            return [...fromApi, ...optimisticRowsRef.current]
-          })
           const tid = window.setTimeout(() => {
             restingReconcileTimeoutsRef.current = restingReconcileTimeoutsRef.current.filter((x) => x !== tid)
             void fetchRestingRowsAndMerge()
           }, OPTIMISTIC_RESTING_GRACE_MS + 200)
           restingReconcileTimeoutsRef.current.push(tid)
-          void resolveQueuePositionsForOrders(ticker, [oid], eventTicker)
-            .then((qp) => {
-              setQueueByOrderId((prev) => ({ ...prev, ...qp }))
-            })
-            .catch(() => {
-              delete optimisticPlacedAtRef.current[oid]
-              optimisticRowsRef.current = optimisticRowsRef.current.filter((r) => r.orderId !== oid)
-              setPlacedOrders((prev) => prev.filter((p) => p.orderId !== oid))
-            })
         }
         if (oid && fullyFilledOrGone) {
           void fetchRestingRowsAndMerge()
@@ -245,6 +234,7 @@ export function OrderbookPanel({
   useEffect(() => {
     optimisticRowsRef.current = []
     optimisticPlacedAtRef.current = {}
+    setConfirmedRestingRows([])
     for (const t of restingReconcileTimeoutsRef.current) clearTimeout(t)
     restingReconcileTimeoutsRef.current = []
   }, [ticker])
@@ -276,18 +266,18 @@ export function OrderbookPanel({
           .filter((r): r is NonNullable<typeof r> => r != null)
         if (cancelled) return
         mergeFromRestingSnapshot(fromApi)
-        const merged = [...fromApi, ...optimisticRowsRef.current]
+        const restingIds = fromApi.map((r) => r.orderId)
 
         if (!eventTicker) {
           try {
-            qp = await resolveQueuePositionsForOrders(ticker, merged.map((r) => r.orderId))
+            qp = await resolveQueuePositionsForOrders(ticker, restingIds)
           } catch {
             // queue chips show … until WS
           }
         }
 
         if (cancelled) return
-        const ids = merged.map((r) => r.orderId)
+        const ids = restingIds
         setQueueByOrderId((prev) => {
           const next: Record<string, number | null> = {}
           for (const id of ids) {
@@ -307,12 +297,12 @@ export function OrderbookPanel({
 
   const mergeQueueMap = useCallback((qp: Record<string, number>) => {
     setQueueByOrderId((prev) => {
-      const orderIds = new Set(placedOrdersRef.current.map((r) => r.orderId))
+      const orderIds = new Set(confirmedRestingRowsRef.current.map((r) => r.orderId))
       const next: Record<string, number | null> = {}
       for (const [id, q] of Object.entries(qp)) {
         if (orderIds.has(id)) next[id] = q
       }
-      for (const r of placedOrdersRef.current) {
+      for (const r of confirmedRestingRowsRef.current) {
         if (next[r.orderId] === undefined) {
           next[r.orderId] = prev[r.orderId] ?? null
         }
@@ -321,9 +311,9 @@ export function OrderbookPanel({
     })
   }, [])
 
-  /** Drop queue / cancel UI for order ids that are no longer on the ladder (filled, cancelled, etc.). */
+  /** Drop queue entries for orders no longer in GET resting (filled, cancelled, etc.). */
   useEffect(() => {
-    const ids = new Set(placedOrders.map((r) => r.orderId))
+    const ids = new Set(confirmedRestingRows.map((r) => r.orderId))
     setQueueByOrderId((prev) => {
       const next: Record<string, number | null> = {}
       for (const [id, q] of Object.entries(prev)) {
@@ -331,7 +321,7 @@ export function OrderbookPanel({
       }
       return next
     })
-  }, [placedOrders])
+  }, [confirmedRestingRows])
 
   useEffect(() => {
     if (!ticker) return
@@ -359,20 +349,22 @@ export function OrderbookPanel({
     )
   }, [ticker, eventTicker, applyRestingOrdersFromApi, onPortfolioRefreshHint])
 
-  /** REST poll: queue moves when others trade — Kalshi user_orders WS only signals your orders. */
+  /** REST poll: queue/cancel chips follow GET resting — keep list fresh alongside WS (initial fetch is the mount effect above). */
   useEffect(() => {
     if (!ticker) return
-    const run = () => {
-      void fetchQueuePositionsForMarket(ticker, eventTicker)
-        .then(mergeQueueMap)
-        .catch(() => {
-          /* keys / network */
-        })
-    }
-    void run()
-    const id = setInterval(run, QUEUE_POLL_INTERVAL_MS)
+    const id = setInterval(() => void fetchRestingRowsAndMerge(), RESTING_ORDERS_POLL_MS)
     return () => clearInterval(id)
-  }, [ticker, eventTicker, mergeQueueMap])
+  }, [ticker, eventTicker, fetchRestingRowsAndMerge])
+
+  /** Refetch queue whenever the orderbook updates (SSE). Others’ trades change depth ahead of you without user_order on your account. */
+  useEffect(() => {
+    if (!ticker) return
+    void fetchQueuePositionsForMarket(ticker, eventTicker)
+      .then(mergeQueueMap)
+      .catch(() => {
+        /* keys / network */
+      })
+  }, [yes, no, ticker, eventTicker, mergeQueueMap])
 
   const handleCancel = useCallback(async (orderId: string) => {
     setCancellingOrderId(orderId)
@@ -380,7 +372,7 @@ export function OrderbookPanel({
       await cancelOrder(orderId)
       delete optimisticPlacedAtRef.current[orderId]
       optimisticRowsRef.current = optimisticRowsRef.current.filter((r) => r.orderId !== orderId)
-      setPlacedOrders((prev) => prev.filter((p) => p.orderId !== orderId))
+      setConfirmedRestingRows((prev) => prev.filter((p) => p.orderId !== orderId))
       setQueueByOrderId((prev) => {
         const next = { ...prev }
         delete next[orderId]
@@ -428,10 +420,10 @@ export function OrderbookPanel({
           </div>
           <p
             className="text-kalshi-textSecondary"
-            title="Resting orders: GET /portfolio/orders + Kalshi user_orders WS. Queue: GET /queue_positions + WS refresh; REST polls for others’ impact on the queue."
+            title="Resting list: GET /portfolio/orders every 3s + WS. Queue/cancel only for orders in that list. Queue # also GET /queue_positions on each book (SSE) update + WS."
           >
-            Orders: {restingWsConnected ? 'WS' : 'WS off'} · Queue: {queueWsConnected ? 'WS' : 'WS off'}{' '}
-            · REST {QUEUE_POLL_INTERVAL_MS / 1000}s
+            Orders: {restingWsConnected ? 'WS' : 'WS off'} · REST {RESTING_ORDERS_POLL_MS / 1000}s · Queue:{' '}
+            {queueWsConnected ? 'WS' : 'WS off'} · on book
           </p>
         </div>
       </div>
@@ -487,7 +479,7 @@ export function OrderbookPanel({
           const busyBuy = pending === `yes-buy-${cents}`
           const busySellYes = pending === `yes-sell-${cents}`
 
-          const myOrdersAtPrice = placedOrders.filter((o) => o.priceCents === cents)
+          const myOrdersAtPrice = confirmedRestingRows.filter((o) => o.priceCents === cents)
           const buySideOrders = myOrdersAtPrice.filter(
             (o) => o.side === 'yes' && o.action === 'buy',
           )

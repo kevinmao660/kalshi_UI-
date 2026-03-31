@@ -216,11 +216,9 @@ export async function resolveQueuePositionsForOrders(
 
 /**
  * Live queue positions: server GET …/queue_positions (event_ticker or market scope) + filter by
- * market, pushed over WS when Kalshi user_orders fires.
+ * market, pushed over WS when Kalshi user_orders fires. The OrderbookPanel also refetches this
+ * REST endpoint whenever the SSE orderbook updates so queue tracks others’ impact on the line.
  */
-/** How often to refetch queue REST (others’ orders change your queue; user_orders WS only covers yours). */
-export const QUEUE_POLL_INTERVAL_MS = 5000
-
 export function subscribeQueuePositions(
   marketTicker: string,
   onPositions: (positions: Record<string, number>) => void,
