@@ -20,6 +20,18 @@ import { RollingMetricsPanel } from '@/components/RollingMetricsPanel'
 import { TradingSizeControls } from '@/components/TradingSizeControls'
 import { cancelAllRestingOrdersForMarkets } from '@/api/orders'
 
+function slugifyKalshiTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+function kalshiWebMarketCode(ticker: string): string {
+  const root = ticker.split('-')[0] ?? ticker
+  return root.toLowerCase()
+}
+
 export function TradingPage() {
   const { ticker: tickerParam } = useParams<{ ticker: string }>()
   const ticker = tickerParam ? decodeURIComponent(tickerParam) : ''
@@ -92,6 +104,19 @@ export function TradingPage() {
     if (team1?.title && team2?.title && team1.title === team2.title) return team1.title
     return team1?.title ?? team2?.title ?? ''
   }, [team1, team2])
+
+  const selectedMarket = useMemo(
+    () => eventMarkets.find((m) => m.ticker === ticker) ?? eventMarkets[0],
+    [eventMarkets, ticker],
+  )
+
+  const kalshiMarketUrl = useMemo(() => {
+    if (!selectedMarket?.ticker) return null
+    const marketCode = kalshiWebMarketCode(selectedMarket.ticker)
+    const slug = slugifyKalshiTitle(selectedMarket.title || selectedMarket.ticker)
+    const marketId = selectedMarket.ticker.toLowerCase()
+    return `https://kalshi.com/markets/${encodeURIComponent(marketCode)}/${slug}/${encodeURIComponent(marketId)}`
+  }, [selectedMarket])
 
   /** Net for the team on the left: fp(left market) − fp(right). Single market: that market’s fp. */
   const leftTeamNetContracts = useMemo(() => {
@@ -179,7 +204,7 @@ export function TradingPage() {
           <div
             className={`justify-self-center ${
               eventMarkets.length > 0
-                ? 'grid max-w-[min(100%,46rem)] grid-cols-[minmax(0,22rem)_minmax(0,22rem)] items-stretch gap-3'
+                ? 'grid max-w-[min(100%,69rem)] grid-cols-[minmax(0,22rem)_minmax(0,22rem)_minmax(0,22rem)] items-stretch gap-3'
                 : 'flex max-w-[min(100%,22rem)] items-stretch justify-center'
             }`}
           >
@@ -254,6 +279,30 @@ export function TradingPage() {
                 )}
               </div>
             </div>
+            )}
+            {kalshiMarketUrl && (
+              <a
+                href={kalshiMarketUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex max-w-[min(100%,22rem)] shrink-0 flex-col items-center justify-center gap-0.5 rounded-xl border border-kalshi-accent/25 bg-kalshi-bg px-4 py-2 text-center hover:border-kalshi-accent/45 hover:bg-kalshi-row/40"
+                title={`Open ${selectedMarket?.ticker ?? ticker} on Kalshi`}
+              >
+                <span className="text-[9px] font-medium uppercase tracking-widest text-kalshi-textSecondary">
+                  Kalshi
+                </span>
+                <span className="text-lg font-semibold leading-tight text-kalshi-text">
+                  Open Market
+                </span>
+                <div className="mt-0.5 flex w-full min-w-0 flex-col gap-0.5 font-mono text-[10px] leading-tight tabular-nums text-kalshi-textSecondary">
+                  <p className="truncate text-kalshi-text" title={selectedMarket?.title ?? ticker}>
+                    {selectedMarket?.title ?? ticker}
+                  </p>
+                  <p className="truncate" title={selectedMarket?.ticker ?? ticker}>
+                    {selectedMarket?.ticker ?? ticker}
+                  </p>
+                </div>
+              </a>
             )}
           </div>
           <div className="min-w-0 justify-self-end text-right">
