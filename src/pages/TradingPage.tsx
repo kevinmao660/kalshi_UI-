@@ -17,6 +17,8 @@ import { useMarketStream } from '@/hooks/useMarketStream'
 import { OrderbookPanel } from '@/components/OrderbookPanel'
 import { TradesFeedPanel } from '@/components/TradesFeedPanel'
 import { RollingMetricsPanel } from '@/components/RollingMetricsPanel'
+import { TradingSizeControls } from '@/components/TradingSizeControls'
+import { cancelAllRestingOrdersForMarkets } from '@/api/orders'
 
 export function TradingPage() {
   const { ticker: tickerParam } = useParams<{ ticker: string }>()
@@ -26,6 +28,8 @@ export function TradingPage() {
   const [metaLoading, setMetaLoading] = useState(true)
   const [positionByTicker, setPositionByTicker] = useState<Record<string, number>>({})
   const [exposureByTicker, setExposureByTicker] = useState<Record<string, number>>({})
+  /** Global order size (contracts) for every market on this page — shared across both orderbooks. */
+  const [tradeSize, setTradeSize] = useState(100)
 
   useEffect(() => {
     if (!ticker) return
@@ -130,6 +134,16 @@ export function TradingPage() {
     }, 250)
   }, [loadPortfolio])
 
+  const handleCancelAllOrders = useCallback(async () => {
+    const tickers = hasPair ? [ticker1, ticker2] : [ticker1].filter(Boolean)
+    if (tickers.length === 0) return
+    await cancelAllRestingOrdersForMarkets({
+      eventTicker: team1?.event_ticker,
+      marketTickers: tickers,
+    })
+    onPortfolioRefreshHint()
+  }, [hasPair, ticker1, ticker2, team1?.event_ticker, onPortfolioRefreshHint])
+
   useEffect(() => {
     if (!ticker1) return
     void loadPortfolio()
@@ -162,9 +176,21 @@ export function TradingPage() {
               </span>
             )}
           </div>
-          {eventMarkets.length > 0 && (
+          <div
+            className={`justify-self-center ${
+              eventMarkets.length > 0
+                ? 'grid max-w-[min(100%,46rem)] grid-cols-[minmax(0,22rem)_minmax(0,22rem)] items-stretch gap-3'
+                : 'flex max-w-[min(100%,22rem)] items-stretch justify-center'
+            }`}
+          >
+            <TradingSizeControls
+              tradeSize={tradeSize}
+              onTradeSizeChange={setTradeSize}
+              onCancelAll={handleCancelAllOrders}
+            />
+            {eventMarkets.length > 0 && (
             <div
-              className="flex max-w-[min(100%,22rem)] flex-col items-center justify-center gap-0.5 justify-self-center rounded-xl border border-kalshi-accent/25 bg-kalshi-bg px-4 py-2 text-center"
+              className="flex max-w-[min(100%,22rem)] shrink-0 flex-col items-center justify-center gap-0.5 rounded-xl border border-kalshi-accent/25 bg-kalshi-bg px-4 py-2 text-center"
               title={
                 hasPair
                   ? `Net vs left column: position_fp(${label1}) − position_fp(${label2}). Avg cost = market_exposure_dollars / |contracts| per market.`
@@ -228,7 +254,8 @@ export function TradingPage() {
                 )}
               </div>
             </div>
-          )}
+            )}
+          </div>
           <div className="min-w-0 justify-self-end text-right">
             {eventTitle && (
               <p className="truncate text-xs text-kalshi-text" title={eventTitle}>
@@ -276,6 +303,7 @@ export function TradingPage() {
                 <OrderbookPanel
                   ticker={ticker1}
                   eventTicker={team1.event_ticker}
+                  orderCount={tradeSize}
                   positionFp={positionByTicker[ticker1]}
                   marketExposureDollars={exposureByTicker[ticker1]}
                   yes={stream1.orderbook.yes}
@@ -299,6 +327,7 @@ export function TradingPage() {
                 <OrderbookPanel
                   ticker={ticker2}
                   eventTicker={team2.event_ticker ?? team1.event_ticker}
+                  orderCount={tradeSize}
                   positionFp={positionByTicker[ticker2]}
                   marketExposureDollars={exposureByTicker[ticker2]}
                   yes={stream2.orderbook.yes}

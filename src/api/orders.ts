@@ -131,6 +131,46 @@ export async function cancelOrder(orderId: string): Promise<void> {
   throw new Error(data.message || data.code || `Cancel failed: ${res.status}`)
 }
 
+/**
+ * Cancel every resting limit order across the given market tickers (e.g. both legs of an event).
+ * Deduplicates by order_id when the same order could appear in multiple fetches.
+ */
+export async function cancelAllRestingOrdersForMarkets(params: {
+  eventTicker?: string
+  marketTickers: string[]
+}): Promise<{ cancelled: number }> {
+  const tickers = [...new Set(params.marketTickers.filter(Boolean))]
+  if (tickers.length === 0) return { cancelled: 0 }
+
+  const seen = new Set<string>()
+  const orderIds: string[] = []
+
+  if (params.eventTicker) {
+    for (const t of tickers) {
+      const { orders } = await fetchRestingOrdersForMarket(params.eventTicker, t)
+      for (const o of orders) {
+        if (o.status === 'resting' && o.order_id && !seen.has(o.order_id)) {
+          seen.add(o.order_id)
+          orderIds.push(o.order_id)
+        }
+      }
+    }
+  } else {
+    for (const t of tickers) {
+      const { orders } = await fetchRestingOrders(t)
+      for (const o of orders) {
+        if (o.status === 'resting' && o.order_id && !seen.has(o.order_id)) {
+          seen.add(o.order_id)
+          orderIds.push(o.order_id)
+        }
+      }
+    }
+  }
+
+  await Promise.all(orderIds.map((id) => cancelOrder(id)))
+  return { cancelled: orderIds.length }
+}
+
 function numericQueueField(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v)
   if (typeof v === 'string' && v.trim() !== '') {

@@ -78,6 +78,8 @@ interface Props {
   marketExposureDollars?: number
   /** Server signals portfolio refetch after fills / order updates (via resting_orders WS). */
   onPortfolioRefreshHint?: () => void
+  /** Contracts per click — shared global size from TradingPage. */
+  orderCount: number
 }
 
 export function OrderbookPanel({
@@ -92,8 +94,8 @@ export function OrderbookPanel({
   positionFp,
   marketExposureDollars,
   onPortfolioRefreshHint,
+  orderCount,
 }: Props) {
-  const [quickSize, setQuickSize] = useState('1')
   const [pending, setPending] = useState<string | null>(null)
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   /** From GET resting + WS only — queue # and cancel only render for these rows (never optimistic-only). */
@@ -114,9 +116,11 @@ export function OrderbookPanel({
   const noMap = useMemo(() => buildSizeMap(no), [no])
 
   const count = useMemo(() => {
-    const n = parseInt(quickSize, 10)
-    return Number.isFinite(n) && n >= 1 ? n : 1
-  }, [quickSize])
+    const n = Math.floor(orderCount)
+    return Number.isFinite(n) && n >= 0 ? n : 0
+  }, [orderCount])
+
+  const canPlace = count >= 1
 
   const avgCostUsd = useMemo(
     () => averageCostPerContractUsd(positionFp, marketExposureDollars),
@@ -170,6 +174,7 @@ export function OrderbookPanel({
 
   const place = useCallback(
     async (side: 'yes' | 'no', action: 'buy' | 'sell', priceCents: number) => {
+      if (count < 1) return
       const key = `${side}-${action}-${priceCents}`
       setPending(key)
       setToast(null)
@@ -396,16 +401,9 @@ export function OrderbookPanel({
           <h2 className="text-[11px] font-medium uppercase tracking-widest text-kalshi-textSecondary">
             Order book
           </h2>
-          <label className="flex items-center gap-1.5 text-[11px] text-kalshi-textSecondary">
-            <span>Qty</span>
-            <input
-              type="number"
-              min={1}
-              value={quickSize}
-              onChange={(e) => setQuickSize(e.target.value)}
-              className="w-14 rounded border border-kalshi-border/80 bg-kalshi-row px-2 py-0.5 font-mono text-xs text-kalshi-text"
-            />
-          </label>
+          <span className="text-[10px] text-kalshi-textSecondary" title="Size is set at the top of the page">
+            Qty {count.toLocaleString()}
+          </span>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] leading-tight">
           <div className="min-w-0 text-kalshi-text">
@@ -534,7 +532,7 @@ export function OrderbookPanel({
                   <button
                     type="button"
                     title="Buy YES"
-                    disabled={busyBuy}
+                    disabled={busyBuy || !canPlace}
                     onClick={() => place('yes', 'buy', cents)}
                     className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-emerald-500 hover:text-emerald-400 disabled:opacity-40"
                   >
@@ -546,7 +544,7 @@ export function OrderbookPanel({
                   <button
                     type="button"
                     title="Sell YES"
-                    disabled={busySellYes}
+                    disabled={busySellYes || !canPlace}
                     onClick={() => place('yes', 'sell', cents)}
                     className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-rose-400 hover:text-rose-300 disabled:opacity-40"
                   >
